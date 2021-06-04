@@ -33,6 +33,7 @@ from sklearn.cluster import KMeans
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.metrics.pairwise import cosine_similarity
 import numba
+import fuzzywuzzy
 
 try:
     from BeautifulSoup import BeautifulSoup
@@ -146,7 +147,7 @@ print('Чтение файла data.json')
 with open('data.json', encoding='utf-8') as f:
     data = json.load(f)
 
-#data = data[:7000]  # для скорости берем только часть
+#data = data[:1000]  # для скорости берем только часть
 print('Число объектов {}.'.format(len(data)))
 
 
@@ -168,7 +169,7 @@ def delete_dubles(anek_df_src, vectora_idf):
             len_max = max(len(anek_dataframe.iloc[i]['Анекдот']), len(anek_dataframe.iloc[k]['Анекдот']))
             popravka = 0.00122 * len_min - 0.0007 * len_max - 0.01629 * len_min / len_max - 0.00055 * (
                         len_min / len_max) ** 2 - 0.04066 * dist * len_min / len_max
-            if (dist>0.4 and 0.47 < dist + popravka < 0.53) and (
+            if (dist>0.4 and 0.49 < dist + popravka < 0.51) and (
                     len_min / len_max > 0.5):
                 print('.')
                 print(cell['Анекдот'])
@@ -190,13 +191,14 @@ def delete_dubles(anek_df_src, vectora_idf):
     return anek_dataframe
 
 
-def recursive_split(data, idx_low, idx_high):
+def recursive_split_big_to_small(data : list, idx_low, idx_high):
     # делим условно пополам
     vectorizer = TfidfVectorizer(analyzer='char', dtype=np.float32, ngram_range=(5, 7), max_features=20000)
-    vectorizer.max_df = 0.95
+    if len(data)>500:
+        vectorizer.max_df = 0.95
     # print(vectorizer.get_feature_names()) # распечатаем слоги, на основе которых работаем
     X = vectorizer.fit_transform(data)
-    if len(data)<30:
+    if len(data)<15:
         # удалим все дубли, вернем результат
         anek_df = pd.DataFrame( data, columns=['Анекдот'])
         anek_df['cluster'] = round( (idx_high+idx_low) / 2)
@@ -214,13 +216,117 @@ def recursive_split(data, idx_low, idx_high):
     data1 = anek_df[anek_df['cluster']==1]
     data1 = data1['Анекдот'].tolist()
 
-    df0 = recursive_split( data0, idx_low, round((idx_low+idx_high)/2)-1)
-    df1 = recursive_split( data1, round((idx_low+idx_high)/2)+1, idx_high)
+    df0 = recursive_split_big_to_small(data0, idx_low, round((idx_low + idx_high) / 2) - 1)
+    df1 = recursive_split_big_to_small(data1, round((idx_low + idx_high) / 2) + 1, idx_high)
     res= pd.concat( [df0, df1], ignore_index=True)
     return res
 
+def recursive_split_to_small(data : list, idx_offset: int):
+    if len(data)<1:
+        print('Error data')
+        return
+    # делим на большое число кластеров
+    cluster_count = round( len(data) / 30) # будем считать, что средний размер кластера должен быть 30
+    if cluster_count<2:
+        cluster_count = 2
+    if cluster_count>200:
+        cluster_count = 200
+    vectorizer = TfidfVectorizer(analyzer='char', dtype=np.float32, ngram_range=(5, 7), max_features=20000)
+    if len(data)>500:
+        vectorizer.max_df = 0.95
+    # print(vectorizer.get_feature_names()) # распечатаем слоги, на основе которых работаем
+    X = vectorizer.fit_transform(data)
+    if len(data)<15:
+        # удалим все дубли, вернем результат
+        anek_df = pd.DataFrame( data, columns=['Анекдот'])
+        anek_df['cluster'] = idx_offset
+        anek_df=delete_dubles(anek_df, X)
+        pbar.update(len(data))
+        return  anek_df, idx_offset + 1
+
+    model = KMeans(n_clusters=cluster_count, init='k-means++', max_iter=400, n_init=3)
+    model.fit(X)
+    labels = model.labels_
+    anek_df = pd.DataFrame(list(zip(labels, data)), columns=['cluster', 'Анекдот'])
+
+    next_clust_number =idx_offset
+    data0 = anek_df[anek_df['cluster'] == 0]
+    data0 = data0['Анекдот'].tolist()
+    anek_res_df, next_clust_number = recursive_split_to_small(data0, next_clust_number)
+
+    for i in range(1, cluster_count):
+        data0 = anek_df[anek_df['cluster']==i]
+        data0 = data0['Анекдот'].tolist()
+        if len(data0) < 1:
+            continue
+        part_i, next_clust_number = recursive_split_to_small(data0, next_clust_number  )
+        anek_res_df = pd.concat([anek_res_df, part_i], ignore_index=True)
+
+    return anek_res_df, next_clust_number
+
+from fuzzywuzzy import fuzz
+def calculate_similarity_of_list_neighbor(data:list):
+    #str1 = 'Та кокетливо отвечает: — Мне ближе к тридцати, чем к двадцати.'
+    #str2 = '— Мне ближе к тридцати, чем к двадцати пяти.'
+    #print(fuzz.token_sort_ratio(str1,str2 ))
+    # https://www.datacamp.com/community/tutorials/fuzzy-string-python
+    result=0
+    count=0
+    for i in range(len(data)-4):
+        result += fuzz.token_sort_ratio(data[i],data[i+1] )
+        result += fuzz.token_sort_ratio(data[i],data[i+2] )
+        result += fuzz.token_sort_ratio(data[i],data[i+3] )
+        result += fuzz.token_sort_ratio(data[i],data[i+4] )
+        count += 4
+    return result/count
+
+def calculate_similarity_of_list_random(data:list):
+    #str1 = 'Та кокетливо отвечает: — Мне ближе к тридцати, чем к двадцати.'
+    #str2 = '— Мне ближе к тридцати, чем к двадцати пяти.'
+    #print(fuzz.token_sort_ratio(str1,str2 ))
+    # https://www.datacamp.com/community/tutorials/fuzzy-string-python
+    import random
+    result=0
+    count=0
+    for i in range(len(data)-4):
+        i2 = random.randrange(len(data))
+        result += fuzz.token_sort_ratio(data[i],data[i2] )
+        count += 1
+    return result/count
+
+def copmape_process_():
+    # сравним насколько хорошо разбиваются на кластеры
+    # кластеры должны быть максимально похожие внутри. Желательно, что бы и соседние были похожими
+    global pbar
+    print('Начинаем сравнение двух подходов recursive_split_to_small и recursive_split_big_to_small')
+    var1 = list()
+    var2 = list()
+    for i in range(4):
+        pbar = tqdm(total=len(data))
+        anek_df, _ = recursive_split_to_small(data, 1)
+        pbar.close()
+        a = calculate_similarity_of_list_neighbor(anek_df.sort_values(by=['cluster'])['Анекдот'].to_list())
+        var1.append(a)
+        print('recursive_split_to_small {}'.format(a))
+
+    for i in range(4):
+        pbar = tqdm(total=len(data))
+        anek_df = recursive_split_big_to_small(data, 100_000,999_000)
+        pbar.close()
+        a = calculate_similarity_of_list_neighbor(anek_df.sort_values(by=['cluster'])['Анекдот'].to_list())
+        var2.append(a)
+        print('recursive_split_big_to_small {}'.format(a))
+    print('Результаты проверки (больше - лучше)')
+    print('recursive_split_to_small')
+    print(sorted( var1))
+    print('recursive_split_big_to_small')
+    print(sorted( var2))
+
+if input('Нужно сравнить два подхода to_small и big_to_small? [Y/N] ').lower() in ('y', 'yes', 'да', '1'):
+    copmape_process_()
+
 pbar = tqdm(total=len(data))
-anek_df=recursive_split(data, 100_000, 999_999 )
+anek_df, _ = recursive_split_to_small(data , 1)
 pbar.close()
 
 print('Запись результата anek-klasters.csv')
@@ -228,5 +334,9 @@ anek_df.sort_values(by=['cluster']).to_csv('anek-klasters.csv', index=False)
 
 with open('data_clean_clustered.json', 'w', encoding='utf-8') as f:
     f.write(anek_df.sort_values(by=['cluster'])['Анекдот'].to_json(force_ascii=False, indent=2, orient='values'))
+
+a1=calculate_similarity_of_list_neighbor(anek_df.sort_values(by=['cluster'])['Анекдот'].to_list())
+a2 = calculate_similarity_of_list_random(anek_df.sort_values(by=['cluster'])['Анекдот'].to_list())
+print('Похожесть осортированных {}; случайных {}'.format(a1, a2))
 
 logging.warning('--- run time {:.2f} seconds ---'.format(time.time() - start_time))
