@@ -18,3 +18,5 @@ anek_html.py содержит функции process_all_pages_anekdotovnet и p
 - Неси ремень, сейчас с отцом набьем. 
 
 хоть и определяются как очень похожие, но не уверенно (score 0.48), поэтому этот дубль не будет удален.
+
+Чуть подробнее читать https://imageman72.livejournal.com/49257.html и https://imageman72.livejournal.com/49467.html
